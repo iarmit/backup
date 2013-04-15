@@ -7,7 +7,15 @@ Version: 1.0
 
 require_once dirname( __FILE__ ) . '/admin-menu.php';
 global $secure_file_store_db_version;
+
 $secure_file_store_db_version = "1.0";
+
+add_action('admin_enqueue_scripts', 'sfs_add_css');
+
+function sfs_add_css() {
+	wp_register_style( 'sfs-style', plugins_url('style.css', __FILE__) );
+	wp_enqueue_style( 'sfs-style' );
+}
 
 function secure_file_store_install() {
 	global $wpdb;
@@ -21,6 +29,7 @@ function secure_file_store_install() {
 		guid text NOT NULL,
 		uploaded_by text NOT NULL,
 		description text DEFAULT '',
+		uploaded datetime NOT NULL,
 		UNIQUE KEY id (id)
 	);";
 
@@ -36,9 +45,17 @@ register_activation_hook( __FILE__,'secure_file_store_install' );
 add_shortcode( 'secure_file_store', 'sfs_handler');
 
 function sfs_handler($attributes) {
-
-	$str = '<form name="file-upload" method="POST" enctype="multipart/form-data" action="';
-	$str .= get_bloginfo('url') . '/index.php?secure-file-store=request-handler" />';
+	$str = '';
+	if (array_key_exists('feedback', $_POST)) {
+		if (strstr($_POST['feedback'], 'ERROR')) {
+		 $str = '<span style="background:#CC0000; color:#FFFFFF; padding: 4px;">'; 
+		} else {
+		 $str = '<span style="background:#0066FF; color:#FFFFFF; padding: 4px;">';
+		}
+		$str .= $_POST['feedback'] . '</span>';
+	}
+	$str .= '<form name="file-upload" method="POST" enctype="multipart/form-data" action="';
+	$str .= $_SERVER['REQUEST_URI'] . '" />';
 	$str .= '<dl><dt>File: </dt>';
 	$str .= '<dd><input type="file" name="file" /></dd>';
 	$str .= '<dt>Description: </dt>';
@@ -47,16 +64,61 @@ function sfs_handler($attributes) {
 	return $str;
 }
 
+
+
 function secure_file_store_parse_request($wp) {
+	global $wpdb;
 	//only process requests with "secure-file-store=request-handler"
-	if (array_key_exists('secure-file-store', $wp->query_vars) 
-		&& $wp->query_vars['secure-file-store'] == 'request-handler')
+//	if (array_key_exists('secure-file-store', $wp->query_vars) 
+	//	&& $wp->query_vars['secure-file-store'] == 'request-handler')
+	$server_options = get_option('ss_settings');
+	$url = $server_options['page_uri'];
+	if (array_key_exists('file', $_FILES) && $url ==  $_SERVER['QUERY_STRING'])
 	{
-		$file = $_FILES['file']['name'];
+		$file = $_FILES['file'];
 		$description = $_POST['description'];
-		$server_options = get_option('ss_settings');
-		$str = $server_options['server_uri'] . ' ' . $server_options['client_id'] . ' ' . $server_options['client_api'];	
-		wp_die($str);
+		$token = sfs_create_token($server_options['client_api']);
+
+		$ch = curl_init();
+		$post_data = array(
+			'client_system_id' => $server_options['client_id'],
+			'token' => $token,
+			'filename' => $file['name'],
+			'file' => '@'.$file['tmp_name'],
+		);
+		curl_setopt($ch, CURLOPT_URL, $server_options['server_uri'] . '/store');
+		//curl_setopt($ch, CURLOPT_POST, 1);
+		curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
+		curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+		curl_setopt($ch, CURLOPT_VERBOSE, 1);
+			
+		$response = curl_exec($ch);
+		if (curl_errno($ch) == 0 && !strstr($response, "ERROR")) {
+			$table_name = $wpdb->prefix . "secure_file_store";
+			$wpdb->insert($table_name, array(
+					'filename' => $file['name'],
+					'guid' => $response,
+					'uploaded_by' => wp_get_current_user()->user_login,
+					'description' => $description,
+					'uploaded' => date('Y-m-d H:i:s'),
+				), array(
+					'%s',
+					'%s',
+					'%s',
+					'%s',
+					'%s',
+				)
+			);
+			//set the feedback message
+			$_POST['feedback'] = "File successfully stored";
+		} else {
+			//an error occured
+			if (curl_errno($ch) == 0) {
+				$_POST['feedback'] = $response;
+			} else {
+				$_POST['feedback'] = "ERROR: Could not store file";
+			}
+		}
 	}
 }
 
